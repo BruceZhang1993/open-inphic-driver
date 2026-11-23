@@ -18,8 +18,21 @@ The analysis target is the Windows installer `INPHIC YU_SetupV2.2.11.exe`. The l
 | Windows configuration interface | `DongleDriver.Info` matches `32c2:0027`, Usage Page `0xff0f`, Usage `0x01` | Match the same top-level HID collection and report length |
 | Receiver model | The local `0x21` reply confirms FWID `0x01660004` and running firmware `0x0902`. The built-in model table maps it to `BYKC 6219 Dongle` with resource version `0x0402` | Confirmed through a Linux `hidraw` query |
 | X9 PRO mouse | The online `0x61` reply confirms FWID `0x00710106` and running firmware `0xeb02`, corresponding to `X9` in the installer. The receiver's `0x2d` returns the same FWID and pairing-record version `0x0402` | Use `0x61` to confirm the online model and running firmware. The pairing record can be used to display the model while offline |
-| USB direct-connect mouse | Windows' generic `MouseDriver.Info` matches `32c2:0024`, `0xff0f:0x01` | `NewMouseDriver` uses 32-byte input/output and Report ID `0x0e`; no direct-connect mouse has been enumerated on this machine yet. Firmware upgrade uses it to send `0x1e` and enter the Bootloader |
-| Bluetooth | The official website lists a Bluetooth mode | The Bluetooth configuration interface and packets have not been observed yet |
+| USB direct-connect mouse | Windows' generic `MouseDriver.Info` matches `32c2:0024`, `0xff0f:0x01` | `NewMouseDriver` uses 32-byte input/output and Report ID `0x0e`. See section 8.1 for settings. Firmware upgrade uses `0x1e` to enter the bootloader |
+| Bluetooth | Hardware name `inphicMouse`, BlueZ PnP ID `32c2:0026`, Linux HID ID `0005:00000000:00000000` | Read connection and BlueZ battery status. The observed GATT and HID reports expose no vendor configuration interface |
+
+The X9 PRO's older `INPHIC SZ_SetupV1.0.13.exe` also matches the generic
+`MouseDriver` against `32c2:0024` and `0xff0f:0x01`. Neither driver
+manager showed a separate Bluetooth configuration entry point.
+[Older INPHIC driver downloads](https://www.inphic.cn/download?pg=3)
+
+On 2026-11-23 the paired X9 PRO exposed standard GATT services `1800`,
+`1801`, `180a`, `180f` and `1812`. The 161-byte report map read from
+`2a4b` matched the Linux HID descriptor. The report references identify
+input reports `01` (mouse), `02` (consumer control), and `03` (keyboard),
+as well as output report `03` (keyboard LEDs). The device exposed neither
+a vendor usage page nor report `0x0e` or a feature report. Its BlueZ
+`org.bluez.Battery1` property reported 100%.
 
 The INPHIC download page lists the X9 PRO within the supported range of this wireless mouse driver. The product page claims a maximum of 12,000 DPI, while the `X9` resource in this installer lists 12,800 DPI. Which hardware or firmware version each source applies to still needs to be checked on real hardware. On the Linux side, read `0x61`, `0x62`, and `0x63` where available first, then choose the value to display and the writable levels. [INPHIC driver downloads](https://www.inphic.cn/download) · [X9 PRO official product page](https://www.inphic.com/zh-hans/products/inphic-x9-pro-vertical-ergonomic-precision-dual-mouse)
 
@@ -348,6 +361,16 @@ This section is based on the disassembly of `BootV1Driver`, `BootV1Device`, `mai
 The `BootV1Driver` constructor parameters on the Windows side are `inputLength=32`, `outputLength=33`, `reportID=0`, `writeFIFOMax=28`, and `readFlashMax=28`. The output length is 33 because the Windows HID write buffer requires the Report ID in the first byte; the Bootloader actually uses unnumbered 32-byte reports, so the Linux `hidraw` write starts at the command byte `0x0e` and totals 32 bytes, with no leading zero.
 
 The `MouseDriver` for a directly connected mouse uses `inputLength=32`, `outputLength=32`, and `reportID=0x0e`; the first byte `0x0e` is the report ID and also the start of the packet.
+
+Wired settings use `MouseDriver.CMD_GetDeviceInfo` (`0x00740720`),
+`CMD_GetDPIInfo` (`0x00740900`), and `CMD_GetDPIs` (`0x00740bc0`) from the
+same installer. USB opcodes `0x20`–`0x23` correspond to the receiver's forwarded
+`0x60`–`0x63`. Mode, DPI, report rates, lighting and advanced settings use
+the fields in section 4 with requests padded to 32 bytes. On USB, `0x20`
+returns settings. The project's battery and charging-state decoding uses
+the receiver's separate `0x20` status reply. Wired model, firmware and
+settings reads were verified on the X9 PRO on 2026-11-23. Settings writes
+have offline replay coverage.
 
 ### 8.2 Firmware file header
 

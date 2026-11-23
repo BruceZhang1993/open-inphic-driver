@@ -3,7 +3,7 @@
 [![Tests](https://github.com/BruceZhang1993/open-inphic-driver/actions/workflows/tests.yml/badge.svg)](https://github.com/BruceZhang1993/open-inphic-driver/actions/workflows/tests.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-**英菲克 2.4G 无线鼠标的 Linux 配置与固件升级工具。**
+**英菲克鼠标的 Linux 配置与固件升级工具。**
 
 [English](README.md) · 中文 · [协议文档](docs/x9-pro-protocol.md)
 
@@ -11,15 +11,17 @@
 > 赞助或支持关系。产品名称与商标归各自所有者所有。刷写固件有风险，请自行承担。
 > 详见 [NOTICE.md](NOTICE.md)。
 
-Open INPHIC 通过 HS6219 接收器的厂商配置接口与鼠标通信，命令行和 Qt 6
-图形界面共用同一套 HID 传输。工具可以读取型号、固件、电量和充电状态，按厂商
-格式显示固件版本（如 `V0071.0106.EB02`），通过 USB 有线连接升级鼠标固件，
-并设置 DPI 档位与数值、有线/无线回报率、配置模式、灯效、休眠时间和高级功能。
+命令行和 Qt 6 图形界面共用设备接入与配置逻辑。
 
-读取与设置功能已在 X9 PRO（FWID `0x00710106`）实机验证。厂商驱动支持的 37 个
-鼠标型号都能识别并读取状态，但只有实机验证过的型号才算已测试，目前是 X9 PRO。
-固件写入流程按厂商 BootV1 协议实现，只有离线协议回放测试，尚未在 Linux 上
-完成实机写入验证。
+| 连接方式 | 支持的功能 |
+| --- | --- |
+| 2.4G 接收器 | 读取型号、固件、电量和充电状态。配置 DPI、回报率、灯效、休眠和高级功能。已在 X9 PRO（FWID `0x00710106`）实机验证读写。 |
+| USB 有线 | 读取型号和固件，支持与 2.4G 相同的配置项。已在 X9 PRO 上验证读取，写入与 BootV1 固件升级通过离线协议测试。 |
+| 蓝牙 | 用 Linux 系统完成配对后，显示连接状态、设备名称和系统提供的电量。蓝牙休眠参数可通过 2.4G 或 USB 有线修改。 |
+
+自动查找顺序为 USB 有线、蓝牙、2.4G。命令行和图形界面都接受
+`--connection usb`、`--connection bluetooth` 或 `--connection 2.4g`。
+同一种连接方式有多个设备时，用 `--device /dev/hidrawN` 指定节点。
 
 ## 功能
 
@@ -95,20 +97,20 @@ PyQt6 wheel 已经包含这些模块。
 ### udev 规则
 
 厂商接口是 `hidraw` 设备。项目提供的规则通过 `uaccess` 把访问权限授予活动的
-本地登录用户，不需要常驻服务，也不需要用 root 运行工具：
+本地登录用户，不需要常驻服务，也不需要用 root 运行工具。早期安装的规则可能
+只匹配 2.4G 接收器。使用 USB 有线模式前，请用下列命令覆盖旧规则。
 
 ```bash
 sudo install -m 0644 udev/70-inphic-x9-pro.rules /etc/udev/rules.d/
 sudo udevadm control --reload-rules
-sudo udevadm trigger
 ```
 
-之后重新插拔接收器。规则覆盖：
+之后重新插拔接收器或 USB 数据线。规则覆盖以下接口。
 
 | USB ID | 设备 | 用途 |
 | --- | --- | --- |
 | `32c2:0027` | HS6219 2.4G 接收器，接口 2 | 状态与全部设置 |
-| `32c2:0024` | USB 直连鼠标，接口 2 | 固件升级 |
+| `32c2:0024` | USB 直连鼠标，接口 2 | 状态、设置与固件升级 |
 | `32c2:001b` | BootV1 Bootloader | 固件升级 |
 
 权限授予有活动本地会话的用户。SSH 登录通常没有本地会话，`uaccess` 不生效；
@@ -143,6 +145,7 @@ open-inphic set-led --effect 3 --brightness 2 --speed 1
 
 # 休眠与高级功能
 open-inphic set-advance --sleep 2 --deep-sleep 1
+open-inphic set-advance --bluetooth-sleep 2 --bluetooth-deep-sleep 1
 open-inphic set-advance --lift 2 --ripple-control on --line-correct off
 ```
 
@@ -158,13 +161,13 @@ open-inphic set-advance --lift 2 --ripple-control on --line-correct off
 - `set-advance --sleep` 取 0-6（10、30、60、120、180、300、600 秒）；
   `--deep-sleep` 取 0-6（5、10、15、20、30、40、60 分钟）；`--lift` 取
   0-3（1-4 mm）。
+- `--bluetooth-sleep` 和 `--bluetooth-deep-sleep` 接受设备代码 0-7。
 - 高级功能开关：`--ultra-low-delay`、`--ultra-low-power`、
   `--ripple-control`、`--move-wake-up`、`--line-correct`，取值
   `on` 或 `off`。
-- 接入多个匹配接收器时，可在子命令前加 `--device /dev/hidrawN`。图形界面
-  也接受该参数。鼠标唤醒或接收器重插后，可点击界面上的「刷新」重新读取。
-- `firmware` 与 `status` 都按厂商格式显示版本；接入 USB 直连鼠标且没有
-  接收器时，`firmware` 会读取鼠标自己的型号与版本。
+- 选择连接方式的参数要放在子命令前，例如 `open-inphic --connection usb status`。
+  如果蓝牙鼠标使用通用名称，可以直接用 `--device /dev/hidrawN` 读取该节点。
+- `firmware` 与 `status` 按厂商格式显示 2.4G 和 USB 有线模式下读取的固件版本。
 
 ### 固件
 
@@ -279,8 +282,8 @@ FWID `0x00710106` 与固件版本 `0xeb02`，前两段为 FWID 的高低 16 位�
 
 | 现象 | 处理 |
 | --- | --- |
-| 「未找到 2.4G 接收器」 | 重插接收器；确认 udev 规则已安装；用 `udevadm info` 查看节点。 |
-| 「无法访问 /dev/hidrawN」 | 安装 udev 规则并使用本地登录；大多数 SSH 会话不适用 `uaccess`。 |
+| 「未找到 2.4G 设备」 | 重插接收器；确认 udev 规则已安装；用 `udevadm info` 查看节点。 |
+| 「已识别配置接口，但当前用户无权访问」 | 更新 udev 规则后重新插拔设备，并使用活动的本地登录会话。 |
 | 找到多个接收器 | 用 `--device /dev/hidrawN` 指定节点（见 `open-inphic --help`）。 |
 | 鼠标离线 / 查询超时 | 移动或轻按鼠标唤醒；确认鼠标处于 2.4G 模式。 |
 | 设置写入失败 | 接收器偶尔会丢帧。工具会重试并回滚；重新执行命令并查看 `status`。 |
@@ -302,8 +305,8 @@ FWID `0x00710106` 与固件版本 `0xeb02`，前两段为 FWID 的高低 16 位�
 
 按键重映射、宏编辑和每档 DPI 颜色属于鼠标 Flash 内容（`0x52`/`0x51`/
 `0x50`/`0x53` 传输与配置区编码）。在完成只读备份工具和经过验证的恢复流程
-之前，这些功能不会开放写入。USB 直连的完整配置界面和蓝牙模式也尚未实现；固件
-升级目前只支持 USB 有线鼠标，接收器固件只显示版本，不提供写入。
+之前，这些功能不会开放写入。X9 PRO 蓝牙直连只公开标准 HID 报告，读取固件和修改
+设置请使用 2.4G 或 USB 有线。固件升级使用 USB 有线，接收器固件只显示版本。
 
 ## 项目结构
 

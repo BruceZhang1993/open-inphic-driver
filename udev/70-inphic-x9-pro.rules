@@ -1,7 +1,7 @@
 # Give the active local session access to the receiver's configuration interface.
 SUBSYSTEM=="hidraw", KERNELS=="0003:32C2:0027.*", IMPORT{builtin}="usb_id", ENV{ID_USB_INTERFACE_NUM}=="02", TAG+="uaccess"
 
-# Wired mouse configuration interface (used by the firmware upgrade).
+# Wired mouse configuration and firmware upgrade interface.
 SUBSYSTEM=="hidraw", KERNELS=="0003:32C2:0024.*", IMPORT{builtin}="usb_id", ENV{ID_USB_INTERFACE_NUM}=="02", TAG+="uaccess"
 
 # BootV1 bootloader interface.  It is a separate USB device with a single

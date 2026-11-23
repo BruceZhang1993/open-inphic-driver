@@ -399,7 +399,8 @@ def open_device(node: Path):
         handle = open(node, "r+b", buffering=0)
     except PermissionError as error:
         raise DeviceError(
-            f"无法访问 {node}，请安装项目的 udev 规则并重新插拔设备。"
+            f"已识别配置接口 {node}，但当前用户无权访问。"
+            "请安装或更新项目的 udev/70-inphic-x9-pro.rules，然后重新连接设备。"
         ) from error
     except OSError as error:
         raise DeviceError(f"无法打开 {node}：{error}") from error

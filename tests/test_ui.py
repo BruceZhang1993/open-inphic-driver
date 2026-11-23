@@ -1,6 +1,6 @@
 """GUI wiring checks: controls exist, dispatch, gate on connection state, and theme."""
 
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from dataclasses import replace
 from pathlib import Path
 import tempfile
@@ -16,7 +16,7 @@ from PyQt6.QtWidgets import QApplication, QSystemTrayIcon
 
 from open_inphic import firmware
 from open_inphic.gui import Controller
-from open_inphic.hid import RATES
+from open_inphic.hid import BluetoothMouse, RATES
 
 from test_features import FakeMouse
 
@@ -24,7 +24,7 @@ BUTTONS = ["refresh", "applyMode", "applySlot", "applyDpi", "applyRate",
            "applyUsbRate", "applyLed", "applySleep"]
 FIRMWARE_BUTTONS = ["chooseFirmware", "downloadFirmware", "applyFirmware"]
 COMBOS = ["configMode", "dpiSlot", "pollingRate", "usbPollingRate", "ledEffect",
-          "ledBrightness", "ledSpeed", "sleepTime", "deepSleepTime", "liftHeight"]
+          "ledBrightness", "ledSpeed", "sleepConnection", "sleepTime", "deepSleepTime", "liftHeight"]
 FIELDS = ["dpiValue", "operationStatus"]
 SWITCHES = ["flag_ultra_low_delay", "flag_ultra_low_power", "flag_ripple_control",
             "flag_move_wake_up", "flag_line_correct"]
@@ -43,7 +43,7 @@ class UiTest(unittest.TestCase):
         self.mouse = FakeMouse()
 
         @contextmanager
-        def fake_connection(_node):
+        def fake_connection(_node, _connection):
             yield self.mouse
 
         patch("open_inphic.gui.open_mouse", fake_connection).start()
@@ -187,6 +187,30 @@ class UiTest(unittest.TestCase):
         QMetaObject.invokeMethod(combo, "activated", Q_ARG("int", 3))
         self.settle()
         self.assertEqual(self.mouse.settings.advance.lift, 3)
+
+    def test_bluetooth_status_disables_editing_and_refreshes_after_switching_back(self):
+        mouse = BluetoothMouse(Path("/dev/hidraw999"), "INPHIC X9 PRO")
+        with patch("open_inphic.gui.open_mouse", return_value=nullcontext(mouse)):
+            self.controller.poll()
+            self.settle()
+        self.assertEqual(self.item("connectionStatus").property("text"), "蓝牙 · 在线")
+        self.assertFalse(self.item("applyMode").property("enabled"))
+        self.controller.poll()
+        self.settle()
+        self.assertEqual(self.item("connectionStatus").property("text"), "2.4G · 在线")
+        self.assertTrue(self.item("applyMode").property("enabled"))
+
+    def test_bluetooth_sleep_edit_uses_bluetooth_fields(self):
+        combo = self.item("sleepConnection")
+        self.select("sleepConnection", 1)
+        QMetaObject.invokeMethod(combo, "activated", Q_ARG("int", 1))
+        self.assertEqual(self.item("sleepTime").property("currentIndex"), 2)
+        self.select("sleepTime", 4)
+        self.select("deepSleepTime", 3)
+        self.click("applySleep")
+        advance = self.mouse.settings.advance
+        self.assertEqual((advance.bluetooth_sleep, advance.bluetooth_deep), (4, 3))
+        self.assertEqual((advance.wireless_sleep, advance.wireless_deep), (2, 1))
 
     def test_switches_react_to_real_clicks(self):
         self.window.resize(640, 900)

@@ -111,7 +111,7 @@ class ControllerTest(unittest.TestCase):
         self.mouse = FakeMouse()
 
         @contextmanager
-        def fake_connection(_node):
+        def fake_connection(_node, _connection):
             yield self.mouse
 
         connection = patch("open_inphic.gui.open_mouse", fake_connection)

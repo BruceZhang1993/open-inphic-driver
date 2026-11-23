@@ -1,24 +1,27 @@
-"""Linux hidraw controls for INPHIC 2.4G mice on the HS6219 receiver."""
+"""Linux hidraw controls for INPHIC mice."""
 
 import argparse
 from collections.abc import Callable
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
-import fcntl
 import hashlib
 import os
 from pathlib import Path
 import re
 import select
+import subprocess
 import sys
 import time
 
 HID_SYSFS = Path("/sys/class/hidraw")
+BLUETOOTH_SYSFS = Path("/sys/class/bluetooth")
 HID_ID = "HID_ID=0003:000032C2:00000027"
 VENDOR_COLLECTION = bytes.fromhex(
     "06 0f ff 09 01 a1 01 85 0e 09 02 15 00 26 ff 00 "
     "75 08 95 1f 81 02 09 02 15 00 26 ff 00 75 08 95 0f 91 02 c0"
 )
+CONNECTION_LABELS = {"2.4g": "2.4G", "usb": "USB 有线", "bluetooth": "蓝牙"}
+BLUETOOTH_READ_ONLY = "蓝牙鼠标已连接。请切换到 2.4G 或 USB 有线模式修改设置。"
 # Microsoft mouse base identifier; the low 24 bits carry the vendor's model FWID.
 MOUSE_BASE_FWID = 0x00400000
 EMPTY_DPI = 0xFF
@@ -168,8 +171,8 @@ class Pairing:
 class DeviceState:
     receiver_firmware: int
     online: bool
-    battery: int
-    charging: bool
+    battery: int | None
+    charging: bool | None
     firmware: int | None = None
     settings: Settings | None = None
     dpi_codes: bytes = b""
@@ -177,6 +180,9 @@ class DeviceState:
     pairing: Pairing | None = None
     receiver_fwid: int = 0
     mouse_fwid: int = 0
+    connection: str = "2.4g"
+    node: Path | None = None
+    device_name: str | None = None
 
     @property
     def slots(self) -> dict[int, int]:
@@ -195,7 +201,7 @@ class DeviceState:
             return model_name(self.mouse_fwid)
         if self.pairing is not None and self.pairing.firmware_id:
             return model_name(self.pairing.firmware_id)
-        return None
+        return self.device_name
 
 
 def model_name(fwid: int) -> str | None:
@@ -233,28 +239,79 @@ def receiver_nodes() -> list[Path]:
     ]
 
 
-@contextmanager
-def open_mouse(node: Path | None = None):
-    if node is None:
-        nodes = receiver_nodes()
-        if not nodes:
-            raise DeviceError("未找到 2.4G 接收器。")
-        if len(nodes) != 1:
-            raise DeviceError("找到多个接收器，请用 --device 指定节点。")
-        node = nodes[0]
-    if not is_receiver_node(node):
-        raise DeviceError(f"{node} 未匹配接收器配置接口。")
-
+def bluetooth_mouse_name(node: Path, *, explicit: bool = False) -> str | None:
+    if node.parent != Path("/dev") or not re.fullmatch(r"hidraw\d+", node.name):
+        return None
+    device = HID_SYSFS / node.name / "device"
     try:
-        handle = open(node, "r+b", buffering=0)
-    except PermissionError as error:
-        raise DeviceError(f"无法访问 {node}，请安装项目的 udev 规则。") from error
-    with handle:
-        try:
-            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError as error:
-            raise DeviceBusy("另一项设置操作正在使用接收器，请稍后重试。") from error
-        yield Mouse(handle)
+        properties = dict(line.split("=", 1) for line in (device / "uevent").read_text().splitlines()
+                          if "=" in line)
+        hid_id = properties.get("HID_ID", "")
+        name = properties.get("HID_NAME", "").strip()
+        if not hid_id.startswith("0005:"):
+            return None
+        recognized = hid_id.startswith("0005:000032C2:") or name.casefold() == "inphicmouse" or re.search(
+            r"(?:^|[^a-z0-9])inphic(?:$|[^a-z0-9])|英菲克|^x9[ -]*pro\b", name, re.IGNORECASE
+        )
+        if not (explicit or recognized):
+            return None
+        descriptor = (device / "report_descriptor").read_bytes()
+    except OSError:
+        return None
+    if bytes.fromhex("05 01 09 02 a1 01") in descriptor or any(device.glob("input/input*/mouse*")):
+        return name or "蓝牙鼠标"
+    return None
+
+
+@contextmanager
+def open_mouse(node: Path | None = None, connection: str = "auto"):
+    from .firmware import direct_mouse_nodes, is_direct_mouse_node, open_device
+
+    bluetooth_name = None
+    if node is None:
+        usb_nodes = direct_mouse_nodes() if connection in ("auto", "usb") else []
+        bluetooth_nodes = {}
+        if not usb_nodes and connection in ("auto", "bluetooth"):
+            for entry in sorted(HID_SYSFS.glob("hidraw*")):
+                candidate = Path("/dev") / entry.name
+                if name := bluetooth_mouse_name(candidate):
+                    bluetooth_nodes[candidate] = name
+        if usb_nodes:
+            nodes, connection = usb_nodes, "usb"
+        elif bluetooth_nodes:
+            nodes, connection = list(bluetooth_nodes), "bluetooth"
+        elif connection in ("auto", "2.4g"):
+            nodes, connection = receiver_nodes(), "2.4g"
+        else:
+            nodes = []
+        if not nodes:
+            label = CONNECTION_LABELS[connection]
+            raise DeviceError(f"未找到 {label} 设备。")
+        if len(nodes) != 1:
+            raise DeviceError(f"找到多个 {CONNECTION_LABELS[connection]} 设备，请用 --device 指定节点。")
+        node = nodes[0]
+        bluetooth_name = bluetooth_nodes.get(node)
+    elif connection == "auto":
+        if is_receiver_node(node):
+            connection = "2.4g"
+        elif is_direct_mouse_node(node):
+            connection = "usb"
+        else:
+            connection = "bluetooth"
+
+    if connection == "bluetooth":
+        name = bluetooth_name or bluetooth_mouse_name(node, explicit=True)
+        if not name:
+            raise DeviceError(f"{node} 未匹配蓝牙鼠标接口。")
+        yield BluetoothMouse(node, name)
+        return
+    validate, mouse_class = (
+        (is_direct_mouse_node, DirectMouse) if connection == "usb" else (is_receiver_node, Mouse)
+    )
+    if not validate(node):
+        raise DeviceError(f"{node} 未匹配 {CONNECTION_LABELS[connection]} 配置接口。")
+    with open_device(node) as handle:
+        yield mouse_class(handle, node)
 
 
 def decode_dpi_table(kind: int, report: bytes) -> dict[int, int]:
@@ -373,8 +430,13 @@ def mode_request(mode: int) -> bytes:
 
 
 class Mouse:
-    def __init__(self, handle):
+    connection = "2.4g"
+    write_size = 16
+    opcodes: dict[int, int] = {}
+
+    def __init__(self, handle, node: Path | None = None):
         self.handle = handle
+        self.node = node
 
     def _drain(self) -> None:
         """Discard reports left over by an earlier transaction.
@@ -388,11 +450,11 @@ class Mouse:
                 return
 
     def _query(self, opcode: int, payload: bytes = b"", attempts: int = 3) -> bytes:
-        report = (bytes((0x0E, opcode)) + payload).ljust(16, b"\0")
+        report = (bytes((0x0E, self.opcodes.get(opcode, opcode))) + payload).ljust(self.write_size, b"\0")
         timeout = 0.1 if opcode < 0x60 else 0.3
         for _ in range(attempts):
             self._drain()
-            if self.handle.write(report) != 16:
+            if self.handle.write(report) != self.write_size:
                 raise DeviceError("HID 报告写入不完整。")
             deadline = time.monotonic() + timeout
             while (remaining := deadline - time.monotonic()) > 0:
@@ -431,7 +493,7 @@ class Mouse:
     def keyboard_pairing(self) -> Pairing:
         return pairing_from_report(self._query(0x2E))
 
-    def state(self, power: PowerStatus | None = None) -> DeviceState:
+    def firmware_state(self, power: PowerStatus | None = None) -> DeviceState:
         receiver = self._query(0x21)
         power = power if power is not None else self.power_status()
         state = DeviceState(
@@ -441,14 +503,21 @@ class Mouse:
             power.charging,
             pairing=self.pairing(),
             receiver_fwid=int.from_bytes(receiver[14:18], "big"),
+            node=self.node,
         )
         if not power.online:
             return state
 
         identity = self._query(0x61)
-        fwid = int.from_bytes(identity[14:18], "big")
-        if model_name(fwid) is None:
-            raise DeviceError(f"当前配对鼠标 FWID 为 0x{fwid:08x}，不在支持的型号表内。")
+        return replace(state, firmware=int.from_bytes(identity[18:20], "big"),
+                       mouse_fwid=int.from_bytes(identity[14:18], "big"))
+
+    def state(self, power: PowerStatus | None = None) -> DeviceState:
+        state = self.firmware_state(power)
+        if not state.online:
+            return state
+        if model_name(state.mouse_fwid) is None:
+            raise DeviceError(f"当前鼠标 FWID 为 0x{state.mouse_fwid:08x}，不在支持的型号表内。")
         settings = self._settings()
         dpi = self._query(0x62)
         kind = dpi[11]
@@ -457,8 +526,6 @@ class Mouse:
         table = decode_dpi_table(kind, self._query(0x63))
         return replace(
             state,
-            firmware=int.from_bytes(identity[18:20], "big"),
-            mouse_fwid=fwid,
             settings=settings,
             dpi_codes=dpi[3:11],
             dpi_table=table,
@@ -692,6 +759,76 @@ class Mouse:
         )
 
 
+class DirectMouse(Mouse):
+    connection = "usb"
+    write_size = 32
+    opcodes = {0x60: 0x20, 0x61: 0x21, 0x62: 0x22, 0x63: 0x23}
+
+    def firmware_state(self, power: PowerStatus | None = None) -> DeviceState:
+        identity = self._query(0x61)
+        return DeviceState(
+            0, True, None, None,
+            firmware=int.from_bytes(identity[18:20], "big"),
+            mouse_fwid=int.from_bytes(identity[14:18], "big"),
+            connection=self.connection,
+            node=self.node,
+        )
+
+
+class BluetoothMouse:
+    connection = "bluetooth"
+
+    def __init__(self, node: Path, name: str):
+        self.node = node
+        self.name = name
+
+    def firmware_state(self) -> DeviceState:
+        return self.state()
+
+    def state(self, power: PowerStatus | None = None) -> DeviceState:
+        battery = None
+        device = HID_SYSFS / self.node.name / "device"
+        for capacity in sorted(device.glob("power_supply/*/capacity")):
+            try:
+                value = int(capacity.read_text().strip())
+            except (OSError, ValueError):
+                continue
+            if 0 <= value <= 100:
+                battery = value
+                break
+        if battery is None:
+            battery = bluez_battery(device)
+        return DeviceState(0, True, battery, None, connection=self.connection,
+                           node=self.node, device_name=self.name)
+
+
+def bluez_battery(device: Path) -> int | None:
+    try:
+        properties = (device / "uevent").read_text()
+    except OSError:
+        return None
+    address = re.search(r"^HID_UNIQ=((?:[0-9a-f]{2}:){5}[0-9a-f]{2})$",
+                        properties, re.IGNORECASE | re.MULTILINE)
+    if address is None:
+        return None
+    device_name = "dev_" + address[1].upper().replace(":", "_")
+    for adapter in sorted(BLUETOOTH_SYSFS.glob("hci*")):
+        if not re.fullmatch(r"hci\d+", adapter.name):
+            continue
+        try:
+            result = subprocess.run(
+                ["busctl", "--system", "get-property", "org.bluez",
+                 f"/org/bluez/{adapter.name}/{device_name}", "org.bluez.Battery1", "Percentage"],
+                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, timeout=1,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            return None
+        match = re.fullmatch(r"y (\d{1,3})", result.stdout.strip())
+        if result.returncode == 0 and match and (value := int(match[1])) <= 100:
+            return value
+    return None
+
+
 def sleep_seconds(code: int) -> str:
     if code < len(WIRELESS_SLEEP_SECONDS):
         return f"{WIRELESS_SLEEP_SECONDS[code]} 秒"
@@ -716,40 +853,54 @@ def flag_labels(advance: AdvanceSetting) -> str:
 
 
 def print_firmware(state: DeviceState) -> None:
-    name = RECEIVERS.get(state.receiver_fwid, f"0x{state.receiver_fwid:08x}")
-    print(
-        f"接收器 {name}（FWID 0x{state.receiver_fwid:08x}），"
-        f"固件 {firmware_version(state.receiver_fwid, state.receiver_firmware)}"
-    )
-    if state.settings is None or state.firmware is None or state.mouse_fwid == 0:
+    if state.connection == "bluetooth":
+        raise DeviceError("蓝牙直连无法读取固件版本，请切换到 2.4G 或 USB 有线模式。")
+    if state.connection == "2.4g":
+        name = RECEIVERS.get(state.receiver_fwid, f"0x{state.receiver_fwid:08x}")
+        print(
+            f"接收器 {name}（FWID 0x{state.receiver_fwid:08x}），"
+            f"固件 {firmware_version(state.receiver_fwid, state.receiver_firmware)}"
+        )
+    if state.firmware is None or state.mouse_fwid == 0:
         print("鼠标离线。移动或轻按鼠标后重试。")
         return
-    model = state.model or "未知型号"
+    model = state.model or f"0x{state.mouse_fwid:08x}"
+    label = "USB 直连鼠标" if state.connection == "usb" else "鼠标"
     print(
-        f"鼠标 {model}（FWID 0x{state.mouse_fwid:08x}），"
+        f"{label} {model}（FWID 0x{state.mouse_fwid:08x}），"
         f"固件 {firmware_version(state.mouse_fwid, state.firmware)}"
     )
 
 
 def print_state(state: DeviceState) -> None:
-    name = RECEIVERS.get(state.receiver_fwid, "未知型号")
-    print(
-        f"2.4G 接收器 {name}，固件 "
-        f"{firmware_version(state.receiver_fwid, state.receiver_firmware)}"
-    )
+    if state.connection == "2.4g":
+        name = RECEIVERS.get(state.receiver_fwid, "未知型号")
+        print(
+            f"2.4G 接收器 {name}，固件 "
+            f"{firmware_version(state.receiver_fwid, state.receiver_firmware)}"
+        )
+    else:
+        print(f"连接方式：{CONNECTION_LABELS[state.connection]}")
     pairing = state.pairing
     if pairing is not None and pairing.firmware_id:
         model = model_name(pairing.firmware_id) or f"0x{pairing.firmware_id:08x}"
         print(f"接收器记录的鼠标 {model}，配对记录 0x{pairing.version:04x}")
-    if state.settings is None:
+    if not state.online:
         print("鼠标离线。移动或轻按鼠标后重试。")
         return
     model = state.model or "未知型号"
+    if state.connection == "bluetooth":
+        print(f"{model} · 已连接")
+        if state.battery is not None:
+            print(f"电量 {state.battery}%")
+        print(BLUETOOTH_READ_ONLY)
+        return
     print(
         f"{model}（FWID 0x{state.mouse_fwid:08x}，"
         f"固件 {firmware_version(state.mouse_fwid, state.firmware)}）"
     )
-    print(f"电量 {state.battery}%，{'正在充电' if state.charging else '未充电'}")
+    if state.battery is not None:
+        print(f"电量 {state.battery}%，{'正在充电' if state.charging else '未充电'}")
     mode = state.settings.mode
     selected = state.settings.levels[mode] + 1
     print(f"配置模式 {mode + 1}")
@@ -764,13 +915,20 @@ def print_state(state: DeviceState) -> None:
     print(f"灯效：{led.effect}，亮度 {led.brightness}，速度 {led.speed}，方向 {LED_DIRECTIONS[led.direction]}")
     advance = state.settings.advance
     print(f"休眠：一级 {sleep_seconds(advance.wireless_sleep)}，深度 {deep_sleep_minutes(advance.wireless_deep)}")
+    print(f"蓝牙休眠代码：一级 {advance.bluetooth_sleep}，深度 {advance.bluetooth_deep}")
     print(f"鼠标抬起高度：{lift_label(advance.lift)}")
     print(f"高级功能：{flag_labels(advance)}")
 
 
-def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="英菲克 2.4G 鼠标设置工具（HS6219 接收器）")
+def add_connection_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--device", type=Path, help="指定配置节点，例如 /dev/hidraw4")
+    parser.add_argument("--connection", choices=("auto", *CONNECTION_LABELS), default="auto",
+                        help="指定连接方式，默认按 USB 有线、蓝牙、2.4G 的顺序查找")
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="英菲克鼠标设置工具")
+    add_connection_arguments(parser)
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser("status", help="读取设备、电量、DPI、灯效与高级设置")
     commands.add_parser("firmware", help="显示鼠标与接收器的固件版本")
@@ -848,6 +1006,9 @@ def build_parser() -> argparse.ArgumentParser:
                          dest="wireless_sleep", help="一级休眠代码")
     advance.add_argument("--deep-sleep", type=int, choices=range(len(WIRELESS_DEEP_SLEEP_MINUTES)),
                          dest="wireless_deep", help="深度休眠代码")
+    advance.add_argument("--bluetooth-sleep", type=int, choices=range(8), help="蓝牙一级休眠代码")
+    advance.add_argument("--bluetooth-deep-sleep", type=int, choices=range(8),
+                         dest="bluetooth_deep", help="蓝牙深度休眠代码")
     advance.add_argument("--lift", type=int, choices=range(len(LIFT_LABELS)))
     advance.add_argument("--line-correct", choices=("on", "off"))
     for name, _, label in ADVANCE_FLAGS:
@@ -882,7 +1043,7 @@ def apply_command(mouse: Mouse, args) -> None:
         )
     elif args.command == "set-advance":
         changes = {}
-        for name in ("wireless_sleep", "wireless_deep", "lift"):
+        for name in ("wireless_sleep", "wireless_deep", "bluetooth_sleep", "bluetooth_deep", "lift"):
             value = getattr(args, name, None)
             if value is not None:
                 changes[name] = value
@@ -900,7 +1061,7 @@ def _receiver_fwid(node: Path | None) -> int | None:
     """The paired mouse FWID known through the receiver, if it is reachable."""
 
     try:
-        with open_mouse(node) as mouse:
+        with open_mouse(node, "2.4g") as mouse:
             state = mouse.state()
     except (DeviceError, OSError):
         return None
@@ -927,7 +1088,7 @@ def _current_firmware(node: Path | None):
     if firmware.bootloader_nodes():
         return None
     try:
-        with open_mouse(node) as mouse:
+        with open_mouse(node, "2.4g") as mouse:
             state = mouse.state()
     except (DeviceError, OSError):
         return None
@@ -955,13 +1116,18 @@ def _print_upgrade_plan(plan) -> None:
     print("dry-run：未写入 Flash，也未进入 Bootloader；必要时只读接收器型号用于校验。")
 
 
-def _resolve_fwid(node: Path | None, explicit: int | None) -> int | None:
+def _resolve_fwid(node: Path | None, explicit: int | None, connection: str = "auto") -> int | None:
     from . import firmware
 
     if explicit is not None:
         return explicit
+    if connection == "bluetooth":
+        return None
+    if connection == "usb":
+        with open_mouse(node, connection) as mouse:
+            return mouse.firmware_state().mouse_fwid
     receiver = _receiver_fwid(node)
-    if receiver is not None:
+    if receiver is not None or connection == "2.4g":
         return receiver
     nodes = firmware.direct_mouse_nodes()
     if len(nodes) == 1:
@@ -984,7 +1150,7 @@ def fetch_command(args) -> int:
     from . import firmware
 
     try:
-        expected = _resolve_fwid(args.device, args.fwid)
+        expected = _resolve_fwid(args.device, args.fwid, args.connection)
         if expected is None:
             print(
                 "无法确定鼠标型号：请连接接收器或 USB 直连鼠标，"
@@ -1014,6 +1180,9 @@ def fetch_command(args) -> int:
 def upgrade_command(args) -> int:
     from . import firmware
 
+    if args.connection not in ("auto", "usb"):
+        print("固件升级需要 USB 有线连接。", file=sys.stderr)
+        return 1
     if args.file is not None and (args.download or args.installer is not None):
         print("--file 与 --download/--installer 不能同时使用。", file=sys.stderr)
         return 1
@@ -1039,7 +1208,12 @@ def upgrade_command(args) -> int:
         if expected is None:
             nodes = firmware.direct_mouse_nodes()
             if len(nodes) == 1:
-                expected = firmware.direct_mouse_info(nodes[0]).fwid
+                try:
+                    expected = firmware.direct_mouse_info(nodes[0]).fwid
+                except (DeviceError, OSError) as error:
+                    print(error, file=sys.stderr)
+                    if not args.dry_run or args.file is None:
+                        return 1
 
     if args.download or args.installer is not None:
         try:
@@ -1193,41 +1367,16 @@ def main(argv: list[str] | None = None) -> int:
                 file=sys.stderr,
             )
             return 130
-    if args.command == "firmware":
-        try:
-            with open_mouse(args.device) as mouse:
-                print_firmware(mouse.state())
-            return 0
-        except (DeviceError, OSError) as error:
-            from . import firmware as firmware_module
-
-            if args.device is None and not receiver_nodes():
-                nodes = firmware_module.direct_mouse_nodes()
-                if len(nodes) == 1:
-                    try:
-                        info = firmware_module.direct_mouse_info(nodes[0])
-                    except (DeviceError, OSError) as direct_error:
-                        print(direct_error, file=sys.stderr)
-                        return 1
-                    print(
-                        f"USB 直连鼠标 {info.model}（FWID 0x{info.fwid:08x}），"
-                        f"固件 {info.version_text}"
-                    )
-                    return 0
-                if len(nodes) > 1:
-                    print(
-                        "找到多个 USB 直连鼠标，请用 --device 指定节点。",
-                        file=sys.stderr,
-                    )
-                    return 1
-            print(error, file=sys.stderr)
-            return 1
-
     try:
-        with open_mouse(args.device) as mouse:
+        with open_mouse(args.device, args.connection) as mouse:
+            if args.command == "firmware":
+                print_firmware(mouse.firmware_state())
+                return 0
             if args.command == "status":
                 print_state(mouse.state())
                 return 0
+            if isinstance(mouse, BluetoothMouse):
+                raise DeviceError(BLUETOOTH_READ_ONLY)
             apply_command(mouse, args)
         print("设置已回读确认。")
         return 0

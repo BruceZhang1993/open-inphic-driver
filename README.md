@@ -3,7 +3,7 @@
 [![Tests](https://github.com/BruceZhang1993/open-inphic-driver/actions/workflows/tests.yml/badge.svg)](https://github.com/BruceZhang1993/open-inphic-driver/actions/workflows/tests.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-**Linux settings and firmware upgrade tool for INPHIC 2.4G wireless mice.**
+**Linux settings and firmware upgrade tool for INPHIC mice.**
 
 English · [中文文档](README.zh-CN.md) · [Protocol notes](docs/x9-pro-protocol.en.md)
 
@@ -12,20 +12,19 @@ English · [中文文档](README.zh-CN.md) · [Protocol notes](docs/x9-pro-proto
 > their respective owners. Flashing firmware is done at your own risk. See
 > [NOTICE.md](NOTICE.md) for details.
 
-Open INPHIC talks to the vendor configuration interface of the HS6219 2.4G
-receiver. The command line and the Qt 6 graphical interface share the same HID
-transport. The tool reads the model, firmware version, battery level and
-charging state, displays firmware versions in the vendor's `V0071.0106.EB02`
-form, upgrades mouse firmware over a USB cable, and changes DPI slots and
-values, wired and 2.4G report rates, configuration modes, lighting effects,
-sleep timers and advanced features.
+The command line and the Qt 6 graphical interface share the same device and
+settings code.
 
-Reading and writing settings were verified on a real X9 PRO (FWID
-`0x00710106`). All 37 mouse models known to the vendor driver can be
-recognised and read, but only hardware that has actually been tested counts as
-supported; today that is the X9 PRO. The firmware write path implements the
-vendor's BootV1 protocol and has offline protocol replay tests, but it has not
-yet been verified by writing to real hardware on Linux.
+| Connection | Supported features |
+| --- | --- |
+| 2.4G receiver | Read the model, firmware, battery and charging state. Configure DPI, report rates, lighting, sleep and advanced settings. Settings reads and writes were verified on an X9 PRO (FWID `0x00710106`). |
+| Wired USB | Read the model and firmware, and edit the same settings as over 2.4G. Reads were verified on the X9 PRO. Settings writes and BootV1 firmware upgrades have offline replay coverage. |
+| Bluetooth | After pairing in Linux, view the connection state, device name and any battery reading exposed by the system. Bluetooth sleep settings are configurable over 2.4G or wired USB. |
+
+By default the app looks for wired USB, then Bluetooth, then 2.4G. Both
+interfaces accept `--connection usb`, `--connection bluetooth` and
+`--connection 2.4g`. Use `--device /dev/hidrawN` to select a device when
+several devices match.
 
 ## Features
 
@@ -113,21 +112,21 @@ Debian/Ubuntu). The PyQt6 wheel from PyPI already contains them.
 ### udev rules
 
 The vendor interface is a `hidraw` device. The supplied rule grants the
-active local session access through `uaccess`, without a daemon and without
-running the tool as root:
+active local session access through `uaccess`. Early installations may
+have a rule that only matches the 2.4G receiver. Replace it before using
+wired USB.
 
 ```bash
 sudo install -m 0644 udev/70-inphic-x9-pro.rules /etc/udev/rules.d/
 sudo udevadm control --reload-rules
-sudo udevadm trigger
 ```
 
-Replug the receiver afterwards. The rule covers:
+Replug the receiver or USB cable afterwards. The rule covers these interfaces.
 
 | USB ID | Device | Used for |
 | --- | --- | --- |
 | `32c2:0027` | HS6219 2.4G receiver, interface 2 | status and all settings |
-| `32c2:0024` | Wired mouse, interface 2 | firmware upgrade |
+| `32c2:0024` | Wired mouse, interface 2 | status, settings and firmware upgrade |
 | `32c2:001b` | BootV1 bootloader | firmware upgrade |
 
 Access is granted to the user with the active local session. Over SSH there is
@@ -182,12 +181,12 @@ open-inphic set-advance --lift 2 --ripple-control on --line-correct off
 - Boolean flags: `--ultra-low-delay`, `--ultra-low-power`,
   `--ripple-control`, `--move-wake-up`, `--line-correct`, each `on` or
   `off`.
-- With more than one matching receiver, pass `--device /dev/hidrawN` before
-  the subcommand. The GUI accepts the same option. After the mouse wakes or
-  the receiver is replugged, click **Refresh** in the GUI.
-- `firmware` and `status` display versions in the vendor form. If a wired
-  mouse is connected without a receiver, `firmware` reads the mouse's own
-  model and version.
+- `set-advance --bluetooth-sleep` and `--bluetooth-deep-sleep` take device
+  codes from 0 to 7.
+- Pass the connection option before the subcommand, for example
+  `open-inphic --connection usb status`. For a Bluetooth mouse with a generic
+  name, pass its node explicitly with `--device /dev/hidrawN`.
+- `firmware` and `status` display versions in the vendor form over 2.4G and wired USB.
 
 ### Firmware
 
@@ -325,8 +324,8 @@ sleep after the second.
 
 | Symptom | Fix |
 | --- | --- |
-| `未找到 2.4G 接收器` (no receiver found) | Replug the receiver; make sure the udev rule is installed; run `udevadm info` on the node. |
-| `无法访问 /dev/hidrawN` (permission denied) | Install the udev rule and log in locally; `uaccess` does not apply to most SSH sessions. |
+| `未找到 2.4G 设备` (no receiver found) | Replug the receiver and check the node with `udevadm info`. |
+| `已识别配置接口 … 但当前用户无权访问` (permission denied) | Update the udev rule, reconnect the device, and use an active local session. |
 | Multiple receivers found | Pass `--device /dev/hidrawN` (see `open-inphic --help`). |
 | Mouse offline / query timeouts | Move or click the mouse to wake it; check that it is in 2.4G mode. |
 | Settings write fails | The receiver occasionally drops a frame. The tool retries and rolls back; run the command again and check `status`. |
@@ -353,9 +352,10 @@ sleep after the second.
 Button remapping, macro editing and per-slot DPI colours live in the mouse
 flash (`0x52`/`0x51`/`0x50`/`0x53` transfers and the configuration
 region encoding). They are deliberately not written until a read-only backup
-tool and a verified restore path exist. A complete configuration UI over USB
-and Bluetooth mode are also not implemented; firmware upgrades only support a
-wired USB mouse, and receiver firmware is read-only.
+tool and a verified restore path exist. The X9 PRO exposes standard HID
+reports over Bluetooth. Use 2.4G or wired USB to read the
+firmware version and change settings. Firmware upgrades require a wired
+mouse, and receiver firmware is read-only.
 
 ## Project layout
 

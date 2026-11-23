@@ -676,6 +676,8 @@ class CliTest(unittest.TestCase):
                     0x00710106, 0xEB02
                 )
             ), patch(
+                "open_inphic.firmware.direct_mouse_nodes", return_value=[]
+            ), patch(
                 "open_inphic.firmware.upgrade_mouse",
                 side_effect=AssertionError("must not write"),
             ):
@@ -698,6 +700,10 @@ class CliTest(unittest.TestCase):
                 "open_inphic.hid._receiver_fwid", return_value=None
             ), patch(
                 "open_inphic.hid._current_firmware", return_value=None
+            ), patch(
+                "open_inphic.firmware.direct_mouse_nodes", return_value=[Path("/dev/hidraw4")]
+            ), patch(
+                "open_inphic.firmware.direct_mouse_info", side_effect=PermissionError("permission denied")
             ):
                 with redirect_stdout(output):
                     code = upgrade_command(args)

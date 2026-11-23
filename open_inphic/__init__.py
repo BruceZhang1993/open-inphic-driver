@@ -1,1 +1,1 @@
-"""Linux settings and firmware tools for INPHIC 2.4G mice."""
+"""Linux settings and firmware tools for INPHIC mice."""
