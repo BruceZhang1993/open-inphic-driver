@@ -45,6 +45,19 @@ class FakeMouse:
         settings = replace(self.current.settings, wireless_rates=(RATES.index(rate), 3, 3, 3))
         self.current = replace(self.current, settings=settings)
 
+    def set_led(self, mode=None, brightness=None, speed=None, direction=None):
+        changes = {
+            name: value
+            for name, value in (
+                ("mode", mode), ("brightness", brightness),
+                ("speed", speed), ("direction", direction),
+            )
+            if value is not None
+        }
+        led = replace(self.current.settings.led, **changes)
+        settings = replace(self.current.settings, led=led)
+        self.current = replace(self.current, settings=settings)
+
 
 class TrayTest(unittest.TestCase):
     @classmethod
@@ -105,6 +118,15 @@ class TrayTest(unittest.TestCase):
         self.assertTrue(self.window.property("allowExit"))
         self.window.close()
         self.assertFalse(self.window.isVisible())
+
+    def test_effect_menu_applies_selected_effect(self):
+        self.assertEqual(len(self.tray.effect_actions), len(self.controller.device["ledEffects"]))
+        self.assertFalse(self.tray.effect_actions[2].isChecked())
+        self.tray.effect_actions[2].trigger()
+        self.settle()
+        self.assertTrue(self.tray.effect_actions[2].isChecked())
+        self.assertEqual(self.mouse.current.settings.led.mode, 3)
+        self.assertIn("灯效", self.tray.icon.toolTip())
 
     def test_idle_power_poll_keeps_editor_and_recovers_after_sleep(self):
         field = self.window.findChild(QObject, "dpiValue")

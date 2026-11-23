@@ -217,13 +217,11 @@ class Tray(QObject):
         if effects != self._effect_models:
             self.effects_menu.clear()
             self.effect_actions = []
-            for effect, label in zip(effects, device["ledEffectLabels"]):
+            for index, label in enumerate(device["ledEffectLabels"]):
                 action = self.effects_menu.addAction(label)
                 action.setCheckable(True)
                 action.triggered.connect(
-                    lambda _checked, effect=effect: controller.set_led_effect(
-                        tuple(controller.device["ledEffects"]).index(effect)
-                    )
+                    lambda _checked, index=index: self.controller.set_led_effect(index)
                 )
                 self.effect_actions.append(action)
             self._effect_models = effects
