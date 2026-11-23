@@ -1,6 +1,13 @@
+from collections import deque
+from contextlib import nullcontext, redirect_stderr, redirect_stdout
 from dataclasses import replace
+from io import StringIO
+from pathlib import Path
+from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import Mock, patch
 
+from open_inphic import firmware, hid
 from open_inphic.hid import (
     ADVANCE_FLAGS,
     EMPTY_DPI,
@@ -29,6 +36,106 @@ from open_inphic.hid import (
 
 def settings_report(led=bytes([0x41, 0x00, 0x13, 0x07]), advance=bytes([0x12, 0x12, 0x01, 0x00])):
     return bytes([0x0E, 0x60, 0x00, 0x83, 0xC1, 0xF2, 0xF2, 0xF2]) + led + advance + bytes(16)
+
+
+class ConnectionTest(unittest.TestCase):
+    def make_node(self, root, name, hid_id, hid_name, descriptor):
+        device = root / name / "device"
+        device.mkdir(parents=True)
+        (device / "uevent").write_text(f"HID_ID={hid_id}\nHID_NAME={hid_name}\n")
+        (device / "report_descriptor").write_bytes(bytes.fromhex(descriptor))
+        return device
+
+    def test_wired_status_and_usb_rate_use_direct_report_protocol(self):
+        model = ("0e 21" + " 00" * 12 + " 00 71 01 06 eb 02")
+        settings = settings_report().hex(" ").replace("0e 60", "0e 20", 1)
+        dpi = "0e 22 10 0e 1e 2e 3e 5e fe ff ff 02"
+        table = "0e 23 32 00 ff 00 64 00 00 01"
+        state_packets = [("0e 21", model), ("0e 20", settings),
+                         ("0e 22", dpi), ("0e 23", table)]
+        after = settings.replace("c1 f2 f2 f2", "81 f2 f2 f2", 1)
+        operations = deque([*state_packets, *state_packets,
+                            ("0e 20 00 f0 80 f0 f0 f0", after), ("0e 20", after)])
+        pending = deque()
+        handle = Mock()
+
+        def write(report):
+            request, reply = operations.popleft()
+            self.assertEqual(report, bytes.fromhex(request).ljust(32, b"\0"))
+            pending.append(bytes.fromhex(reply).ljust(32, b"\0"))
+            return len(report)
+
+        handle.write.side_effect = write
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.make_node(root, "hidraw6", "0003:000032C2:00000024", "Wired mouse",
+                           "06 0f ff 09 01 a1 01 85 0e c0")
+            output = StringIO()
+            with (patch.object(hid, "HID_SYSFS", root), patch.object(firmware, "HID_SYSFS", root),
+                  patch.object(firmware, "_valid_node", side_effect=lambda node: node.name == "hidraw6"),
+                  patch.object(firmware, "open_device", return_value=nullcontext(handle)),
+                  patch.object(hid.select, "select", side_effect=lambda readers, *_: (
+                      readers if pending else [], [], [])),
+                  patch.object(hid.os, "read", side_effect=lambda *_: pending.popleft()),
+                  redirect_stdout(output)):
+                self.assertEqual(hid.main(["status"]), 0)
+                self.assertEqual(hid.main(["--device", "/dev/hidraw6", "set-usb-rate", "500"]), 0)
+        self.assertFalse(operations)
+        self.assertIn("USB 有线", output.getvalue())
+        self.assertIn("V0071.0106.EB02", output.getvalue())
+        self.assertIn("2400 DPI", output.getvalue())
+        self.assertIn("设置已回读确认", output.getvalue())
+
+    def test_bluetooth_status_is_read_only_and_reports_kernel_battery(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            descriptor = "05 01 09 02 a1 01 c0"
+            device = self.make_node(root, "hidraw5", "0005:00000000:00000000",
+                                    "INPHIC_BT", descriptor)
+            self.make_node(root, "hidraw6", "0005:00000000:00000000", "Another mouse", descriptor)
+            self.make_node(root, "hidraw7", "0005:000032C2:00000024", "INPHIC keyboard",
+                           "05 01 09 06 a1 01 c0")
+            capacity = device / "power_supply" / "hid-battery" / "capacity"
+            capacity.parent.mkdir(parents=True)
+            capacity.write_text("73\n")
+            output, errors = StringIO(), StringIO()
+            with (patch.object(hid, "HID_SYSFS", root), patch.object(firmware, "HID_SYSFS", root),
+                  patch.object(firmware, "open_device") as open_device,
+                  redirect_stdout(output), redirect_stderr(errors)):
+                self.assertEqual(hid.main(["status"]), 0)
+                self.assertEqual(hid.main(["--connection", "bluetooth", "set-dpi", "800"]), 1)
+                self.assertEqual(hid.main(["--connection", "bluetooth", "firmware"]), 1)
+                self.assertEqual(hid.main(["--connection", "bluetooth", "upgrade", "--file", "x9.bin"]), 1)
+                self.assertEqual(hid.main(["--device", "/dev/hidraw6", "status"]), 0)
+                open_device.assert_not_called()
+        self.assertIn("INPHIC_BT · 已连接", output.getvalue())
+        self.assertIn("电量 73%", output.getvalue())
+        self.assertIn("Another mouse · 已连接", output.getvalue())
+        self.assertIn(hid.BLUETOOTH_READ_ONLY, errors.getvalue())
+
+    def test_bluetooth_status_detects_inphicmouse_and_reads_bluez_battery(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            device = self.make_node(root, "hidraw6", "0005:00000000:00000000", "inphicMouse",
+                                    "05 01 09 02 a1 01 c0")
+            with (device / "uevent").open("a") as properties:
+                properties.write("HID_UNIQ=02:01:02:03:04:05\n")
+            adapters = root / "bluetooth"
+            (adapters / "hci0").mkdir(parents=True)
+            (adapters / "hci0:3585").mkdir()
+            output = StringIO()
+            reply = Mock(returncode=0, stdout="y 100\n")
+            with (patch.object(hid, "HID_SYSFS", root), patch.object(hid, "BLUETOOTH_SYSFS", adapters),
+                  patch.object(firmware, "HID_SYSFS", root),
+                  patch.object(hid.subprocess, "run", return_value=reply) as busctl,
+                  redirect_stdout(output)):
+                self.assertEqual(hid.main(["status"]), 0)
+                busctl.assert_called_once()
+                self.assertEqual(busctl.call_args.args[0][-3:], [
+                    "/org/bluez/hci0/dev_02_01_02_03_04_05", "org.bluez.Battery1", "Percentage",
+                ])
+            self.assertIn("inphicMouse · 已连接", output.getvalue())
+            self.assertIn("电量 100%", output.getvalue())
 
 
 class DecodeTest(unittest.TestCase):

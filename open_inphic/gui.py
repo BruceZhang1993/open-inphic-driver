@@ -18,6 +18,9 @@ except ImportError as error:
 from . import firmware as firmware_module
 from .hid import (
     ADVANCE_FLAGS,
+    BLUETOOTH_READ_ONLY,
+    CONNECTION_LABELS,
+    BluetoothMouse,
     DeviceBusy,
     DeviceError,
     DeviceState,
@@ -32,6 +35,7 @@ from .hid import (
     X9_EFFECTS,
     AdvanceSetting,
     Led,
+    add_connection_arguments,
     firmware_version,
     open_mouse,
 )
@@ -53,9 +57,10 @@ class Controller(QObject):
     upgradeDone = pyqtSignal(bool, str)
     fetchDone = pyqtSignal(bool, str, str)
 
-    def __init__(self, node: Path | None):
+    def __init__(self, node: Path | None, connection: str = "auto"):
         super().__init__()
         self.node = node
+        self.connection = connection
         self.executor = ThreadPoolExecutor(max_workers=1)
         self.finished.connect(self._finished)
         self.upgradeProgressSignal.connect(self._set_upgrade_progress)
@@ -136,30 +141,35 @@ class Controller(QObject):
         led = settings.led if settings else Led(1, 0, 0, 0, 0)
         advance = settings.advance if settings else AdvanceSetting(2, 1, 2, 1, 1)
         effects = Controller._effects(state)
-        receiver_name = RECEIVERS.get(state.receiver_fwid, "—") if state else "—"
+        receiver = state if state and state.connection == "2.4g" else None
+        receiver_name = RECEIVERS.get(receiver.receiver_fwid, "—") if receiver else "—"
         receiver_firmware = (
-            firmware_version(state.receiver_fwid, state.receiver_firmware)
-            if state else "—"
+            firmware_version(receiver.receiver_fwid, receiver.receiver_firmware)
+            if receiver else "—"
         )
+        battery = "—"
+        if state and state.online and state.battery is not None and 0 <= state.battery <= 100:
+            battery = f"{state.battery}%"
+            if state.charging is not None:
+                battery += " · 充电中" if state.charging else " · 未充电"
         return {
             "connected": state is not None,
-            "online": settings is not None,
-            "battery": (
-                f"{state.battery}%" + (" · 充电中" if state.charging else " · 未充电")
-                if settings and state.battery <= 100 else "—"
-            ),
+            "online": bool(state and state.online),
+            "configurable": settings is not None,
+            "connection": CONNECTION_LABELS[state.connection] if state else "",
+            "battery": battery,
             "firmware": (
                 firmware_version(state.mouse_fwid, state.firmware)
-                if settings and state.firmware is not None else "—"
+                if state and state.firmware is not None else "—"
             ),
-            "firmwareHex": f"0x{state.firmware:04x}" if settings else "—",
+            "firmwareHex": f"0x{state.firmware:04x}" if state and state.firmware is not None else "—",
             "receiverFirmware": receiver_firmware,
             "receiverFirmwareHex": (
-                f"0x{state.receiver_firmware:04x}" if state else "—"
+                f"0x{receiver.receiver_firmware:04x}" if receiver else "—"
             ),
             "model": (state.model if state else None) or "—",
             "receiver": receiver_name,
-            "receiverSummary": f"{receiver_name} · {receiver_firmware}" if state else "—",
+            "receiverSummary": f"{receiver_name} · {receiver_firmware}" if receiver else "—",
             "mode": str(settings.mode + 1) if settings else "—",
             "modeIndex": settings.mode if settings else -1,
             "modeLabels": [f"配置模式 {index + 1}" for index in range(4)],
@@ -179,6 +189,8 @@ class Controller(QObject):
             "sleepIndex": advance.wireless_sleep,
             "deepSleepLabels": [f"{value} 分钟" for value in WIRELESS_DEEP_SLEEP_MINUTES],
             "deepSleepIndex": advance.wireless_deep,
+            "bluetoothSleepIndex": advance.bluetooth_sleep,
+            "bluetoothDeepSleepIndex": advance.bluetooth_deep,
             "liftLabels": list(LIFT_LABELS),
             "liftIndex": advance.lift,
             "advanceFlags": [
@@ -205,13 +217,22 @@ class Controller(QObject):
         future.add_done_callback(lambda result: self.finished.emit(result, background))
 
     def _work(self, operation, previous, background):
-        with open_mouse(self.node) as mouse:
-            if background and previous is not None:
+        node, connection = self.node, self.connection
+        if operation is not None and previous is not None and previous.node is not None:
+            node, connection = previous.node, previous.connection
+        with open_mouse(node, connection) as mouse:
+            if isinstance(mouse, BluetoothMouse):
+                if operation is not None:
+                    raise DeviceError(BLUETOOTH_READ_ONLY)
+                return mouse.state(), BLUETOOTH_READ_ONLY
+            if (background and previous is not None and previous.connection == "2.4g"
+                    and (previous.node is None or
+                         (mouse.node == previous.node and mouse.connection == previous.connection))):
                 power = mouse.power_status()
                 if not power.online:
-                    return DeviceState(
-                        previous.receiver_firmware, False, power.battery, power.charging
-                    ), "移动或轻按鼠标即可唤醒。"
+                    return replace(previous, online=False, battery=power.battery,
+                                   charging=power.charging, firmware=None, settings=None,
+                                   dpi_codes=b"", dpi_table=None, mouse_fwid=0), "移动或轻按鼠标即可唤醒。"
                 if previous.online:
                     return replace(previous, battery=power.battery, charging=power.charging), ""
                 return mouse.state(power), ""
@@ -241,6 +262,8 @@ class Controller(QObject):
         connection_changed = (
             (state is None) != (self._state is None)
             or bool(state and state.online) != bool(self._state and self._state.online)
+            or bool(state and self._state and (state.connection, state.node) !=
+                    (self._state.connection, self._state.node))
         )
         self._state = state
         description = self._describe(state)
@@ -322,8 +345,11 @@ class Controller(QObject):
         )
 
     @pyqtSlot(int, int)
-    def set_sleep(self, primary: int, deep: int):
-        self._start(lambda mouse: mouse.set_advance(wireless_sleep=primary, wireless_deep=deep))
+    @pyqtSlot(int, int, bool)
+    def set_sleep(self, primary: int, deep: int, bluetooth: bool = False):
+        changes = (dict(bluetooth_sleep=primary, bluetooth_deep=deep) if bluetooth
+                   else dict(wireless_sleep=primary, wireless_deep=deep))
+        self._start(lambda mouse: mouse.set_advance(**changes))
 
     @pyqtSlot(int)
     def set_lift(self, index: int):
@@ -539,7 +565,7 @@ class Controller(QObject):
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="INPHIC X9 PRO 图形配置界面")
-    parser.add_argument("--device", type=Path, help="指定配置节点，例如 /dev/hidraw4")
+    add_connection_arguments(parser)
     args = parser.parse_args()
     app = QApplication([sys.argv[0]])
     app.setApplicationName("Open INPHIC")
@@ -549,7 +575,7 @@ def main() -> int:
         return 1
     QQuickStyle.setStyle("Material")
 
-    controller = Controller(args.device)
+    controller = Controller(args.device, args.connection)
     engine = QQmlApplicationEngine()
     engine.setInitialProperties({"backend": controller})
     engine.load(QUrl.fromLocalFile(str(Path(__file__).resolve().parent / "ui" / "Main.qml")))

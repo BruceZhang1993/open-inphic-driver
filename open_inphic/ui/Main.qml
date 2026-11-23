@@ -13,7 +13,7 @@ ApplicationWindow {
     readonly property color borderColor: darkMode ? "#384858" : "#dce5ed"
     readonly property color textColor: darkMode ? "#ecf2f8" : "#192734"
     readonly property color mutedColor: darkMode ? "#a8b8c8" : "#4a6073"
-    readonly property bool editable: backend.device.online && !backend.busy
+    readonly property bool editable: backend.device.configurable && !backend.busy
 
     title: "INPHIC X9 PRO"
     width: 640
@@ -35,6 +35,13 @@ ApplicationWindow {
     }
     Component.onCompleted: backend.refresh()
 
+    function syncSleep() {
+        const device = window.backend.editor
+        const bluetooth = sleepConnection.currentIndex === 1
+        sleepBox.currentIndex = bluetooth ? device.bluetoothSleepIndex : device.sleepIndex
+        deepSleepBox.currentIndex = bluetooth ? device.bluetoothDeepSleepIndex : device.deepSleepIndex
+    }
+
     Connections {
         target: window.backend
         function onEditorChanged() {
@@ -46,8 +53,7 @@ ApplicationWindow {
             ledEffectBox.currentIndex = device.ledEffectIndex
             ledBrightnessBox.currentIndex = device.ledBrightness
             ledSpeedBox.currentIndex = 3 - device.ledSpeed
-            sleepBox.currentIndex = device.sleepIndex
-            deepSleepBox.currentIndex = device.deepSleepIndex
+            window.syncSleep()
             liftBox.currentIndex = device.liftIndex
             // 开关的 checked 会在用户点击时断开绑定，刷新后按回读值重新对齐。
             flagUltraLowDelay.checked = device.flags.ultra_low_delay
@@ -90,9 +96,10 @@ ApplicationWindow {
                     }
 
                     Label {
-                        text: window.backend.device.online ? "2.4G · 在线"
-                            : window.backend.device.connected ? "2.4G · 鼠标离线"
-                            : "2.4G · 等待连接"
+                        objectName: "connectionStatus"
+                        text: window.backend.device.online ? window.backend.device.connection + " · 在线"
+                            : window.backend.device.connected ? window.backend.device.connection + " · 鼠标离线"
+                            : "等待连接"
                         color: window.mutedColor
                     }
                 }
@@ -122,7 +129,11 @@ ApplicationWindow {
                     spacing: 12
 
                     Metric { title: "鼠标固件"; value: window.backend.device.firmware }
-                    Metric { title: "接收器"; value: window.backend.device.receiverSummary }
+                    Metric {
+                        title: "接收器"
+                        value: window.backend.device.receiverSummary
+                        visible: value !== "—"
+                    }
                 }
             }
 
@@ -351,6 +362,15 @@ ApplicationWindow {
                     Layout.fillWidth: true
                 }
 
+                ComboBox {
+                    id: sleepConnection
+                    objectName: "sleepConnection"
+                    model: ["2.4G", "蓝牙（设备代码）"]
+                    enabled: window.editable
+                    Accessible.name: "休眠设置的连接方式"
+                    onActivated: window.syncSleep()
+                }
+
                 RowLayout {
                     Layout.fillWidth: true
                     spacing: 8
@@ -366,7 +386,9 @@ ApplicationWindow {
                                 id: sleepBox
                                 objectName: "sleepTime"
                                 Layout.fillWidth: true
-                                model: window.backend.editor.sleepLabels
+                                model: sleepConnection.currentIndex === 1
+                                    ? ["0", "1", "2", "3", "4", "5", "6", "7"]
+                                    : window.backend.editor.sleepLabels
                                 currentIndex: -1
                                 enabled: window.editable
                                 Accessible.name: "一级休眠时间"
@@ -380,7 +402,8 @@ ApplicationWindow {
                                 id: deepSleepBox
                                 objectName: "deepSleepTime"
                                 Layout.fillWidth: true
-                                model: window.backend.editor.deepSleepLabels
+                                model: sleepConnection.currentIndex === 1
+                                    ? sleepBox.model : window.backend.editor.deepSleepLabels
                                 currentIndex: -1
                                 enabled: window.editable
                                 Accessible.name: "深度休眠时间"
@@ -393,8 +416,9 @@ ApplicationWindow {
                         text: "应用"
                         Layout.preferredWidth: 76
                         Layout.alignment: Qt.AlignVCenter
-                        enabled: window.editable && sleepBox.currentIndex >= 0
-                        onClicked: window.backend.set_sleep(sleepBox.currentIndex, deepSleepBox.currentIndex)
+                        enabled: window.editable && sleepBox.currentIndex >= 0 && deepSleepBox.currentIndex >= 0
+                        onClicked: window.backend.set_sleep(sleepBox.currentIndex, deepSleepBox.currentIndex,
+                                                            sleepConnection.currentIndex === 1)
                     }
                 }
             }

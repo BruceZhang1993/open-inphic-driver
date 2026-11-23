@@ -147,8 +147,9 @@ class Tray(QObject):
 
         device = self.controller.device
         state = self.controller.state
-        editable = device["online"] and not self.controller.busy and not self._exiting
-        percent = state.battery if device["online"] and 0 <= state.battery <= 100 else None
+        editable = device["configurable"] and not self.controller.busy and not self._exiting
+        percent = (state.battery if device["online"] and state.battery is not None
+                   and 0 <= state.battery <= 100 else None)
         charging = bool(device["online"] and state.charging)
         icon_state = (percent, charging)
         if self._icon_state != icon_state:
@@ -156,22 +157,27 @@ class Tray(QObject):
             self._icon_state = icon_state
 
         if device["online"]:
-            power = f"{percent}%" if percent is not None else "电量未知"
-            charge = "充电中" if charging else "未充电"
-            status = f"{power} · {charge}"
-            model = device["model"] if device["model"] != "—" else "X9 PRO"
-            lines = [
-                f"INPHIC {model} · 2.4G 在线",
-                f"电池 {status}",
-                f"鼠标固件 {device['firmware']} · 接收器固件 {device['receiverFirmware']}",
-                f"配置模式 {device['mode']}",
-                f"灯效 {device['ledEffectLabels'][device['ledEffectIndex']] if device['ledEffectIndex'] >= 0 else '—'}",
-            ]
-            if device["slotIndex"] >= 0:
-                lines.append(f"DPI {device['slotLabels'][device['slotIndex']]}")
-            lines.append(f"2.4G 回报率 {device['rateLabels'][device['rateIndex']]}")
+            status = device["battery"] if percent is not None else f"{device['connection']} 在线"
+            title = device["model"] if device["model"] != "—" else "X9 PRO"
+            lines = [f"INPHIC {title} · {device['connection']} 在线"]
+            if percent is not None:
+                lines.append(f"电池 {status}")
+            if device["firmware"] != "—":
+                lines.append(f"鼠标固件 {device['firmware']}")
+            if device["receiverFirmware"] != "—":
+                lines.append(f"接收器固件 {device['receiverFirmware']}")
+            if device["configurable"]:
+                lines.append(f"配置模式 {device['mode']}")
+                if device["ledEffectIndex"] >= 0:
+                    lines.append(f"灯效 {device['ledEffectLabels'][device['ledEffectIndex']]}")
+                if device["slotIndex"] >= 0:
+                    lines.append(f"DPI {device['slotLabels'][device['slotIndex']]}")
+                if state.connection == "usb":
+                    lines.append(f"有线回报率 {device['rateLabels'][device['usbRateIndex']]}")
+                else:
+                    lines.append(f"2.4G 回报率 {device['rateLabels'][device['rateIndex']]}")
         else:
-            status = "鼠标离线" if device["connected"] else "等待接收器"
+            status = "鼠标离线" if device["connected"] else "等待连接"
             title = device["model"] if device["model"] != "—" else "X9 PRO"
             lines = [f"INPHIC {title} · {status}"]
             if device["receiverFirmware"] != "—":

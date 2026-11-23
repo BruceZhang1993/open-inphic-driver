@@ -16,10 +16,22 @@
 | Windows 配置接口 | `DongleDriver.Info` 匹配 `32c2:0027`、Usage Page `0xff0f`、Usage `0x01` | 匹配同一顶层 HID 集合和报告长度 |
 | 接收器型号 | 本机 `0x21` 回包确认 FWID 为 `0x01660004`，运行固件为 `0x0902`。内置型号表对应 `BYKC 6219 Dongle`，资源版本为 `0x0402` | 已通过 Linux `hidraw` 查询确认 |
 | X9 PRO 鼠标 | 在线 `0x61` 回包确认 FWID `0x00710106`、运行固件 `0xeb02`，对应安装包内的 `X9`。接收器 `0x2d` 返回同一 FWID 和配对记录版本 `0x0402` | 以 `0x61` 确认在线型号和运行固件。配对记录可用于离线时显示型号 |
-| USB 直连鼠标 | Windows 通用 `MouseDriver.Info` 匹配 `32c2:0024`、`0xff0f:0x01` | `NewMouseDriver` 使用 32 字节输入/输出、Report ID `0x0e`；本机尚未枚举过直连鼠标。固件升级用它发送 `0x1e` 进入 Bootloader |
-| 蓝牙 | 官网列出蓝牙模式 | 蓝牙配置接口和报文尚未观察 |
+| USB 直连鼠标 | Windows 通用 `MouseDriver.Info` 匹配 `32c2:0024`、`0xff0f:0x01` | `NewMouseDriver` 使用 32 字节输入/输出、Report ID `0x0e`。日常配置见第 8.1 节，固件升级用 `0x1e` 进入 Bootloader |
+| 蓝牙 | 实机名称 `inphicMouse`，BlueZ PnP ID `32c2:0026`，Linux HID ID `0005:00000000:00000000` | 读取连接与 BlueZ 电量。实测 GATT 和 HID 报告未暴露厂商配置通道 |
 
 英菲克下载页将 X9 PRO 列入这套无线鼠标驱动的支持范围。产品页标称最高 12,000 DPI，本安装包的 `X9` 资源列出 12,800 DPI。两项资料的适用硬件或固件版本待实机核对。Linux 端先读取 `0x61`、`0x62` 和可用的 `0x63`，再选择显示值和可写档位。 [英菲克驱动下载](https://www.inphic.cn/download) · [X9 PRO 官方产品页](https://www.inphic.com/zh-hans/products/inphic-x9-pro-vertical-ergonomic-precision-dual-mouse)
+
+另核对了 X9 PRO 的旧版 `INPHIC SZ_SetupV1.0.13.exe`。两版驱动的
+`NewManager` 和 `MouseDriver.Info` 都使用 `32c2:0024`、
+`0xff0f:0x01` 匹配通用 HID 鼠标，未找到独立的蓝牙配置入口。
+[英菲克旧版驱动下载页](https://www.inphic.cn/download?pg=3)
+
+2026-11-23 的蓝牙实机枚举确认，设备只公开标准 GATT 服务 `1800`、`1801`、
+`180a`、`180f` 和 `1812`。从 `2a4b` 读取的 161 字节报告映射与内核
+HID 描述符一致。报告引用为输入 `01`（鼠标）、`02`（媒体控制）、
+`03`（键盘）和输出 `03`（键盘指示灯）。本次没有看到厂商 Usage Page、
+报告 `0x0e` 或 Feature Report。电量由 BlueZ 的 `org.bluez.Battery1` 提供，
+实机读取为 100%。
 
 ## 2. Linux HID 传输
 
@@ -346,6 +358,14 @@ nm -n "$sample" | rg 'DongleDriver|resourcesAppDevice(0x00710106|ModellistJson)'
 Windows 端的 `BootV1Driver` 构造参数是 `inputLength=32`、`outputLength=33`、`reportID=0`、`writeFIFOMax=28`、`readFlashMax=28`。输出长度 33 是因为 Windows 的 HID 写入缓冲要求首字节放 Report ID；Bootloader 实际使用无编号 32 字节报告，所以 Linux 的 `hidraw` 写入从命令字节 `0x0e` 开始，共 32 字节，不带前导零。
 
 直连鼠标的 `MouseDriver` 使用 `inputLength=32`、`outputLength=32`、`reportID=0x0e`；首字节 `0x0e` 是报告 ID，也是报文开头。
+
+直连日常配置来自同一安装包的 `MouseDriver.CMD_GetDeviceInfo`（`0x00740720`）、
+`CMD_GetDPIInfo`（`0x00740900`）和 `CMD_GetDPIs`（`0x00740bc0`）。
+USB 的 `0x20`–`0x23` 分别对应接收器转发的 `0x60`–`0x63`。
+配置模式、DPI、回报率、灯效和高级设置复用第 4 节的有效字段，USB 请求补齐到
+32 字节。USB 的 `0x20` 回包是配置数据，项目中的电量和充电状态解析使用的是
+接收器单独的 `0x20` 回包。2026-11-23 在 X9 PRO 上验证了 USB 有线型号、
+固件和日常设置的读取。写入设置已通过离线回放测试。
 
 ### 8.2 固件文件头
 
