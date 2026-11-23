@@ -128,6 +128,22 @@ class TrayTest(unittest.TestCase):
         self.assertEqual(self.mouse.current.settings.led.mode, 3)
         self.assertIn("灯效", self.tray.icon.toolTip())
 
+    def test_startup_shows_tray_only_until_opened_from_icon(self):
+        self.addCleanup(self.tray.timer.stop)
+        self.window.show()
+        self.app.processEvents()
+        self.assertTrue(self.window.isVisible())
+
+        self.tray.show(window_visible=False)
+        self.assertFalse(self.window.isVisible())
+        self.assertTrue(self.tray.icon.isVisible())
+        self.assertTrue(self.tray.timer.isActive())
+
+        self.tray.activate(QSystemTrayIcon.ActivationReason.Trigger)
+        self.settle()
+        self.assertTrue(self.window.isVisible())
+        self.assertTrue(self.tray.icon.isVisible())
+
     def test_idle_power_poll_keeps_editor_and_recovers_after_sleep(self):
         field = self.window.findChild(QObject, "dpiValue")
         self.assertEqual(field.property("text"), "2400")

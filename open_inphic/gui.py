@@ -587,7 +587,8 @@ def main() -> int:
         if not isinstance(window, QQuickWindow):
             return 1
         tray = Tray(app, window, controller)
-        tray.show()
+        # 启动时只显示托盘图标，设置窗口由托盘图标或菜单按需打开。
+        tray.show(window_visible=False)
         return app.exec()
     finally:
         controller.executor.shutdown()

@@ -218,8 +218,10 @@ report rate, lighting, sleep, advanced features and firmware upgrade. Writes
 are confirmed by reading the affected field back; a failed write attempts to
 restore the previous value and tells you whether that restore was confirmed.
 
-Closing the window hides the application to the tray. Use the tray menu to
-reopen the window, change common settings, or quit.
+The app starts with only its tray icon: the settings window stays hidden until
+you click the icon or choose **Open settings** from the tray menu. Closing the
+window hides it back to the tray; the tray menu also changes common settings and
+quits the app.
 
 ## Firmware versions and upgrades
 
@@ -308,9 +310,10 @@ sleep after the second.
 
 ## System tray
 
-- Closing the window hides the app to the tray. Click the tray icon or choose
-  **Open settings** to restore it. **Quit Open INPHIC** ends the app; an
-  operation that is already running is allowed to finish first.
+- Startup shows only the tray icon; the settings window is opened by clicking
+  the icon or choosing **Open settings**, and closing it hides it back to the
+  tray. **Quit Open INPHIC** ends the app; an operation that is already running
+  is allowed to finish first.
 - The tray menu changes the configuration mode, DPI slot, 2.4G report rate,
   wired report rate and lighting effect directly.
 - Hovering shows battery percentage, charging state, mouse and receiver

@@ -115,7 +115,12 @@ class Tray(QObject):
         self.timer.timeout.connect(controller.poll)
         self.sync()
 
-    def show(self):
+    def show(self, window_visible: bool = True):
+        """Start the tray; the settings window only opens when asked for."""
+        if window_visible:
+            self.window.show()
+        else:
+            self.window.hide()
         self.icon.show()
         self.timer.start()
 
